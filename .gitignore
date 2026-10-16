@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.streamlit/secrets.toml
+
+# Local datasets and generated labels/results
+data/
+outputs/image_masks/
+outputs/image_masks_full/
+outputs/predicted_masks/
+outputs/predicted_masks_full/
+outputs/image_labels.csv
+outputs/test_predictions.csv
