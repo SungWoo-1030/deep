@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import pickle
 from pathlib import Path
 from typing import Literal
 
@@ -104,12 +105,31 @@ def load_model(
             "GitHub 저장소의 outputs 폴더에 모델 파일을 포함했는지 확인하세요."
         )
 
-    checkpoint = torch.load(model_path, map_location="cpu", weights_only=True)
     expected_type = "classification" if mode == "classification" else "segmentation"
-    if checkpoint.get("version") != MODEL_VERSION:
-        raise ValueError(f"지원하지 않는 모델 버전입니다: {model_path.name}")
-    if checkpoint.get("model_type", expected_type) != expected_type:
+    model, classes, image_size, model_type = load_model_from_bytes(
+        model_path.read_bytes(), model_path.name
+    )
+    if model_type != expected_type:
         raise ValueError(f"선택한 모델 유형과 파일 내용이 일치하지 않습니다: {model_path.name}")
+    return model, classes, image_size
+
+
+def load_model_from_bytes(
+    checkpoint_data: bytes, model_name: str
+) -> tuple[ImageClassifier | SegmentationClassifier, list[str], int, str]:
+    try:
+        checkpoint = torch.load(
+            io.BytesIO(checkpoint_data), map_location="cpu", weights_only=True
+        )
+    except (pickle.UnpicklingError, EOFError, RuntimeError) as error:
+        raise ValueError(f"모델 파일을 안전하게 읽을 수 없습니다: {model_name}") from error
+
+    if not isinstance(checkpoint, dict) or checkpoint.get("version") != MODEL_VERSION:
+        raise ValueError(f"지원하지 않거나 올바르지 않은 모델 파일입니다: {model_name}")
+
+    model_type = checkpoint.get("model_type", "segmentation")
+    if model_type not in ("classification", "segmentation"):
+        raise ValueError(f"모델 유형을 확인할 수 없습니다: {model_name}")
 
     classes = checkpoint.get("classes")
     image_size = checkpoint.get("image_size")
@@ -117,20 +137,28 @@ def load_model(
     if (
         not isinstance(classes, list)
         or len(classes) < 2
-        or not all(isinstance(name, str) for name in classes)
+        or not all(isinstance(name, str) and name for name in classes)
+        or len(set(classes)) != len(classes)
         or not isinstance(image_size, int)
+        or isinstance(image_size, bool)
+        or image_size < 8
+        or image_size > 512
+        or image_size % 8 != 0
         or not isinstance(state_dict, dict)
     ):
-        raise ValueError(f"모델 파일의 클래스/가중치 정보가 올바르지 않습니다: {model_path.name}")
+        raise ValueError(f"모델 파일의 클래스/가중치 정보가 올바르지 않습니다: {model_name}")
 
     model: ImageClassifier | SegmentationClassifier
-    if mode == "classification":
+    if model_type == "classification":
         model = ImageClassifier(len(classes))
     else:
         model = SegmentationClassifier(len(classes))
-    model.load_state_dict(state_dict)
+    try:
+        model.load_state_dict(state_dict)
+    except RuntimeError as error:
+        raise ValueError(f"모델 가중치 구조가 지원되지 않습니다: {model_name}") from error
     model.eval()
-    return model, classes, image_size
+    return model, classes, image_size, model_type
 
 
 def predict_image(

@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import zipfile
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import streamlit as st
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 from model_runtime import (
     IMAGE_SIZE,
     MODEL_FILES,
     ModelMode,
+    load_model_from_bytes,
     open_uploaded_image,
     load_model,
     predict_image,
@@ -127,7 +130,7 @@ st.markdown(
     <section class="hero">
       <div class="hero-kicker">NEU / VISION SYSTEMS · AI INSPECTION STUDIO</div>
       <h1>이미지로 시작하는<br>스마트 품질 검사</h1>
-      <p>학습된 모델을 선택하고 사진을 올리면 결함 분류와 영역 예측 결과를 확인할 수 있습니다.</p>
+      <p>모델 체크포인트와 사진을 올리고, 정답 마스크가 있다면 예측 결과와 비교할 수 있습니다.</p>
     </section>
     """,
     unsafe_allow_html=True,
@@ -137,6 +140,52 @@ st.markdown(
 @st.cache_resource(show_spinner="선택한 AI 모델을 불러오는 중...")
 def get_model(mode: ModelMode) -> tuple[Any, list[str], int]:
     return load_model(OUTPUT_DIR, mode)
+
+
+@st.cache_resource(show_spinner="업로드한 AI 모델을 안전하게 불러오는 중...")
+def get_uploaded_model(
+    checkpoint_data: bytes, model_name: str
+) -> tuple[Any, list[str], int, str]:
+    return load_model_from_bytes(checkpoint_data, model_name)
+
+
+def upload_key(filename: str, *, is_mask: bool = False) -> str:
+    name = Path(filename.replace("\\", "/")).stem.casefold()
+    if is_mask and name.endswith(".mask"):
+        name = name[:-5]
+    return name
+
+
+def load_reference_masks(
+    uploads: list[Any],
+) -> tuple[dict[str, tuple[np.ndarray, str]], list[str]]:
+    reference_masks: dict[str, tuple[np.ndarray, str]] = {}
+    errors: list[str] = []
+    ambiguous_keys: set[str] = set()
+
+    for upload in uploads:
+        key = upload_key(upload.name, is_mask=True)
+        try:
+            with Image.open(io.BytesIO(upload.getvalue())) as source:
+                mask_image = source.convert("L")
+                mask = np.asarray(mask_image, dtype=np.uint8) > 127
+        except (OSError, UnidentifiedImageError, ValueError) as error:
+            errors.append(f"{upload.name}: 읽을 수 없는 마스크 파일입니다 ({error}).")
+            continue
+
+        if key in ambiguous_keys:
+            continue
+        if key in reference_masks:
+            previous_name = reference_masks.pop(key)[1]
+            ambiguous_keys.add(key)
+            errors.append(
+                f"같은 이미지 이름에 대응하는 마스크가 중복되었습니다: "
+                f"{previous_name}, {upload.name}"
+            )
+            continue
+        reference_masks[key] = (mask, upload.name)
+
+    return reference_masks, errors
 
 
 def make_mask_archive(results: list[dict[str, Any]]) -> bytes:
@@ -158,9 +207,15 @@ def process_uploads(
     model: Any,
     classes: list[str],
     image_size: int,
+    reference_masks: dict[str, tuple[np.ndarray, str]],
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     errors: list[str] = []
+    image_key_counts: dict[str, int] = {}
+    for upload in uploads:
+        key = upload_key(upload.name)
+        image_key_counts[key] = image_key_counts.get(key, 0) + 1
+
     for index, upload in enumerate(uploads, start=1):
         try:
             image = open_uploaded_image(upload.getvalue())
@@ -171,6 +226,44 @@ def process_uploads(
         predicted_class, confidence, mask = predict_image(
             image, model, classes, image_size
         )
+        reference_mask = None
+        reference_mask_filename = None
+        iou = None
+        dice = None
+        key = upload_key(upload.name)
+        if key in reference_masks:
+            reference_mask, reference_mask_filename = reference_masks[key]
+            if image_key_counts[key] > 1:
+                errors.append(
+                    f"{upload.name}: 이미지 파일명이 중복되어 정답 마스크와 "
+                    "안전하게 연결할 수 없습니다."
+                )
+                reference_mask = None
+            elif reference_mask.shape != (image.height, image.width):
+                errors.append(
+                    f"{reference_mask_filename}: 원본 이미지 {upload.name}와 "
+                    "크기가 달라 비교할 수 없습니다."
+                )
+                reference_mask = None
+            elif mask is None:
+                errors.append(
+                    f"{reference_mask_filename}: 분류 전용 모델은 마스크를 "
+                    "예측하지 않아 비교할 수 없습니다."
+                )
+                reference_mask = None
+            else:
+                intersection = int(np.count_nonzero(mask & reference_mask))
+                union = int(np.count_nonzero(mask | reference_mask))
+                predicted_area = int(np.count_nonzero(mask))
+                reference_area = int(np.count_nonzero(reference_mask))
+                iou = intersection / union if union else 1.0
+                dice_denominator = predicted_area + reference_area
+                dice = (
+                    2 * intersection / dice_denominator
+                    if dice_denominator
+                    else 1.0
+                )
+
         safe_stem = Path(upload.name.replace("\\", "/")).stem
         results.append(
             {
@@ -180,6 +273,10 @@ def process_uploads(
                 "confidence": confidence,
                 "mask": mask,
                 "area": float(mask.mean()) if mask is not None else None,
+                "reference_mask": reference_mask,
+                "reference_mask_filename": reference_mask_filename,
+                "iou": iou,
+                "dice": dice,
                 "mask_filename": f"{index:04d}_{safe_stem}_mask.png",
             }
         )
@@ -193,28 +290,73 @@ def process_uploads(
 
 with st.sidebar:
     st.markdown("### 검사 설정")
-    selected_label = st.selectbox("사용할 학습 모델", list(MODEL_OPTIONS))
-    selected_mode = MODEL_OPTIONS[selected_label]
-    st.caption(f"모델 파일: `outputs/{MODEL_FILES[selected_mode]}`")
-    st.caption(f"입력 크기: {IMAGE_SIZE} × {IMAGE_SIZE} 픽셀")
+    model_source = st.radio(
+        "모델 파일 선택",
+        ["저장소 기본 모델", "체크포인트 업로드"],
+    )
+    model = None
+    class_names: list[str] = []
+    input_size = IMAGE_SIZE
+    model_kind: str | None = None
+    selected_mode: ModelMode | None = None
+    model_identity: str
+
+    if model_source == "저장소 기본 모델":
+        selected_label = st.selectbox("사용할 학습 모델", list(MODEL_OPTIONS))
+        selected_mode = MODEL_OPTIONS[selected_label]
+        model_identity = selected_mode
+        st.caption(f"모델 파일: `outputs/{MODEL_FILES[selected_mode]}`")
+        try:
+            model, class_names, input_size = get_model(selected_mode)
+            model_kind = (
+                "classification" if selected_mode == "classification" else "segmentation"
+            )
+        except (FileNotFoundError, ValueError) as error:
+            st.error(str(error))
+            st.info("저장소의 `outputs` 폴더에 선택한 모델 파일을 포함했는지 확인하세요.")
+    else:
+        uploaded_checkpoint = st.file_uploader(
+            "학습된 모델 체크포인트",
+            type=["pt", "pth"],
+            accept_multiple_files=False,
+            max_upload_size=20,
+            help="이 앱에서 학습해 저장한 .pt/.pth 체크포인트를 올리세요. 파일은 저장하지 않습니다.",
+        )
+        if uploaded_checkpoint is None:
+            st.info("분석을 시작하려면 학습된 .pt 또는 .pth 모델 파일을 올리세요.")
+            model_identity = "uploaded:none"
+        else:
+            checkpoint_data = uploaded_checkpoint.getvalue()
+            model_identity = "uploaded:" + hashlib.sha256(checkpoint_data).hexdigest()
+            try:
+                model, class_names, input_size, model_kind = get_uploaded_model(
+                    checkpoint_data, uploaded_checkpoint.name
+                )
+                st.caption(f"업로드한 모델: `{uploaded_checkpoint.name}`")
+            except ValueError as error:
+                st.error(str(error))
+
+    if model is not None:
+        st.caption(f"입력 크기: {input_size} × {input_size} 픽셀")
 
     st.markdown("---")
     st.markdown("**모델 안내**")
-    if selected_mode == "manual":
+    if model_kind == "classification":
+        st.caption("이미지 분류만 수행하며 결함 영역 마스크는 생성하지 않습니다.")
+    elif (
+        model_kind == "segmentation"
+        and model_source == "저장소 기본 모델"
+        and selected_mode == "manual"
+    ):
         st.caption("브러시로 직접 표시한 마스크와 클래스 라벨을 학습한 모델입니다.")
-    elif selected_mode == "full_image":
+    elif (
+        model_kind == "segmentation"
+        and model_source == "저장소 기본 모델"
+        and selected_mode == "full_image"
+    ):
         st.caption("전체 이미지 마스크와 클래스 라벨로 별도 학습한 모델입니다.")
-    else:
-        st.caption("클래스 분류만 수행하며 결함 영역 마스크는 생성하지 않습니다.")
-
-try:
-    model, class_names, input_size = get_model(selected_mode)
-except (FileNotFoundError, ValueError) as error:
-    st.error(str(error))
-    st.info(
-        "GitHub 저장소에 `outputs` 폴더와 선택한 모델 파일을 포함했는지 확인하세요."
-    )
-    st.stop()
+    elif model_kind == "segmentation":
+        st.caption("업로드한 분할 체크포인트로 이미지 분류와 결함 영역 예측을 수행합니다.")
 
 uploads = st.file_uploader(
     "검사할 이미지 업로드",
@@ -222,34 +364,59 @@ uploads = st.file_uploader(
     accept_multiple_files=True,
     help="여러 장을 한 번에 선택할 수 있습니다. 업로드 파일은 서버 디스크에 저장하지 않습니다.",
 )
+mask_uploads = st.file_uploader(
+    "비교할 정답 마스크 업로드 (선택)",
+    type=["png", "bmp", "tif", "tiff"],
+    accept_multiple_files=True,
+    help=(
+        "흑백 이진 마스크를 올리세요. 이미지와 파일명(확장자 제외)이 같거나 "
+        "이미지명.mask.png 형식이어야 하며, 원본과 크기가 같아야 합니다."
+    ),
+)
 
 run_inference = st.button(
     "선택 이미지 분석",
     type="primary",
-    disabled=not uploads,
+    disabled=not uploads or model is None,
     width="stretch",
 )
 
-if run_inference:
+if run_inference and uploads and model is not None:
     try:
+        references, mask_errors = load_reference_masks(mask_uploads or [])
+        for error in mask_errors:
+            st.error(error)
         with st.spinner(f"{len(uploads)}장 이미지를 분석하고 있습니다..."):
             st.session_state["inspection_results"] = process_uploads(
-                uploads, model, class_names, input_size
+                uploads, model, class_names, input_size, references
             )
-            st.session_state["inspection_mode"] = selected_mode
+            st.session_state["inspection_mode"] = model_identity
     except ValueError as error:
         st.error(str(error))
         st.stop()
 
 results = st.session_state.get("inspection_results", [])
 results_mode = st.session_state.get("inspection_mode")
-if results and results_mode == selected_mode:
+if results and results_mode == model_identity:
     average_confidence = sum(item["confidence"] for item in results) / len(results)
+    compared_results = [item for item in results if item["iou"] is not None]
     st.markdown("### 검사 요약")
-    metric_columns = st.columns(3)
+    metric_columns = st.columns(5)
     metric_columns[0].metric("분석 이미지", f"{len(results)}장")
     metric_columns[1].metric("학습 클래스", f"{len(class_names)}종")
     metric_columns[2].metric("평균 분류 점수", f"{average_confidence:.1%}")
+    metric_columns[3].metric(
+        "평균 마스크 IoU",
+        f"{np.mean([item['iou'] for item in compared_results]):.3f}"
+        if compared_results
+        else "—",
+    )
+    metric_columns[4].metric(
+        "평균 마스크 Dice",
+        f"{np.mean([item['dice'] for item in compared_results]):.3f}"
+        if compared_results
+        else "—",
+    )
 
     result_rows = [
         {
@@ -257,10 +424,35 @@ if results and results_mode == selected_mode:
             "분류 결과": item["predicted_class"],
             "분류 점수 (보정되지 않음)": f"{item['confidence']:.1%}",
             "결함 표시 면적": f"{item['area']:.1%}" if item["area"] is not None else "미실행",
+            "정답 마스크": item["reference_mask_filename"] or "미업로드",
+            "마스크 IoU": f"{item['iou']:.3f}" if item["iou"] is not None else "—",
+            "마스크 Dice": f"{item['dice']:.3f}" if item["dice"] is not None else "—",
         }
         for item in results
     ]
     st.dataframe(pd.DataFrame(result_rows), width="stretch", hide_index=True)
+
+    if mask_uploads:
+        matched_masks = {
+            item["reference_mask_filename"]
+            for item in results
+            if item["reference_mask_filename"] is not None
+        }
+        unmatched_masks = [
+            upload.name for upload in mask_uploads if upload.name not in matched_masks
+        ]
+        without_masks = sum(
+            item["reference_mask_filename"] is None for item in results
+        )
+        if unmatched_masks:
+            st.warning(
+                "이미지와 이름이 일치하지 않아 사용하지 않은 정답 마스크: "
+                + ", ".join(unmatched_masks)
+            )
+        if without_masks:
+            st.info(f"정답 마스크가 연결되지 않은 이미지: {without_masks}장")
+    else:
+        st.caption("정답 마스크를 올리지 않으면 IoU/Dice 비교는 생략됩니다.")
 
     csv_data = pd.DataFrame(result_rows).to_csv(index=False).encode("utf-8-sig")
     download_columns = st.columns(2)
@@ -271,7 +463,7 @@ if results and results_mode == selected_mode:
         mime="text/csv",
         width="stretch",
     )
-    if selected_mode != "classification":
+    if model_kind == "segmentation":
         download_columns[1].download_button(
             "예측 마스크 PNG 묶음 다운로드",
             data=make_mask_archive(results),
@@ -291,6 +483,28 @@ if results and results_mode == selected_mode:
                 st.image(
                     item["image"],
                     caption="원본 이미지 · 분류 전용 모델은 결함 영역을 예측하지 않습니다.",
+                    width="stretch",
+                )
+            elif item["reference_mask"] is not None:
+                original, reference, predicted = st.columns(3)
+                original.image(
+                    item["image"],
+                    caption="원본 이미지",
+                    width="stretch",
+                )
+                reference.image(
+                    Image.fromarray(
+                        item["reference_mask"].astype("uint8") * 255, mode="L"
+                    ),
+                    caption=f"정답 마스크 · {item['reference_mask_filename']}",
+                    width="stretch",
+                )
+                predicted.image(
+                    render_mask_overlay(item["image"], item["mask"]),
+                    caption=(
+                        f"예측 마스크 · IoU {item['iou']:.3f} · "
+                        f"Dice {item['dice']:.3f}"
+                    ),
                     width="stretch",
                 )
             else:

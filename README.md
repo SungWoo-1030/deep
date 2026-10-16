@@ -26,9 +26,19 @@ Keep these trained model files in the repository:
 - `outputs/image_classifier.pt` — classification only
 
 The `.gitignore` excludes generated masks, prediction files, local datasets, and virtual
-environments, but does not exclude the trained `.pt` model files. Uploads are processed
-in memory and are not saved to the app's filesystem. Results can be downloaded as CSV,
-and segmentation masks can be downloaded as PNG or a ZIP archive.
+environments, but does not exclude the trained `.pt` model files. The app can also use a
+locally trained `.pt`/`.pth` checkpoint uploaded in the sidebar (up to 20 MB); it is
+loaded with PyTorch's restricted `weights_only` mode and is not saved to the app's
+filesystem.
+
+Upload inspection images in the main panel. Optionally upload binary grayscale ground
+truth masks as PNG, BMP, or TIFF to compare segmentation results. A mask must have the
+same dimensions as its image and a matching filename stem, for example `part-01.jpg`
+with `part-01.png` or `part-01.mask.png`. The app reports per-image and average IoU/Dice
+scores and displays the reference mask next to the prediction. Classification-only
+checkpoints cannot be compared against masks. Image, checkpoint, and mask uploads are
+processed in memory and are not saved to the app's filesystem. Results can be downloaded
+as CSV, and predicted segmentation masks as PNG or a ZIP archive.
 
 ## Model training
 
