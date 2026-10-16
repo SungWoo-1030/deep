@@ -679,7 +679,11 @@ def train_model(
 
 
 def train_classification_model(
-    training_folder: str, epochs: int, batch_size: int, learning_rate: float
+    training_folder: str,
+    epochs: int,
+    batch_size: int,
+    learning_rate: float,
+    model_path: Path = CLASSIFICATION_MODEL_PATH,
 ) -> Iterator[tuple[str, pd.DataFrame]]:
     if not 1 <= int(epochs) <= 100:
         raise ValueError("Epoch는 1~100 사이여야 합니다.")
@@ -762,12 +766,12 @@ def train_classification_model(
         classes,
         root,
         signatures,
-        model_path=CLASSIFICATION_MODEL_PATH,
+        model_path=model_path,
         model_type="classification",
     )
     count_summary = ", ".join(f"{name}: {count}장" for name, count in counts.items())
     yield (
-        f"분류 전용 학습 완료. 모델 저장: `{display_path(CLASSIFICATION_MODEL_PATH)}`  \n"
+        f"분류 전용 학습 완료. 모델 저장: `{display_path(model_path)}`  \n"
         f"폴더별 이미지: {count_summary} · 검증 정확도 "
         f"**{history[-1]['val_accuracy']:.1%}**. 새 이미지 성능을 보장하지 않습니다.",
         pd.DataFrame(history),

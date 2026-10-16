@@ -1,7 +1,8 @@
 # NEU VISION · Streamlit
 
-Streamlit app for running the saved image-classification and defect-segmentation models.
-The app accepts image uploads and does not depend on the original Windows dataset paths.
+Streamlit app for defect-mask labeling, model training, and single-image or full-folder
+classification/segmentation. Streamlit Community Cloud users upload ZIP datasets; local
+users can instead enter folder paths accessible to the computer running Streamlit.
 
 ## Run locally
 
@@ -31,21 +32,35 @@ locally trained `.pt`/`.pth` checkpoint uploaded in the sidebar (up to 20 MB); i
 loaded with PyTorch's restricted `weights_only` mode and is not saved to the app's
 filesystem.
 
-Upload inspection images in the main panel. Optionally upload binary grayscale ground
-truth masks as PNG, BMP, or TIFF to compare segmentation results. A mask must have the
-same dimensions as its image and a matching filename stem, for example `part-01.jpg`
-with `part-01.png` or `part-01.mask.png`. The app reports per-image and average IoU/Dice
-scores and displays the reference mask next to the prediction. Classification-only
-checkpoints cannot be compared against masks. Image, checkpoint, and mask uploads are
-processed in memory and are not saved to the app's filesystem. Results can be downloaded
-as CSV, and predicted segmentation masks as PNG or a ZIP archive.
+The Streamlit navigation has four workflows:
 
-## Model training
+- **AI inspection:** upload individual images and optionally matching binary grayscale
+  ground-truth masks. A mask must match the image dimensions and filename stem, such as
+  `part-01.jpg` with `part-01.mask.png`. Segmentation results include IoU/Dice
+  comparisons; results can be downloaded as CSV and PNG/ZIP masks.
+- **Defect labeling:** upload a training ZIP or enter a local folder path. The training
+  layout is `train/class_name/image.jpg`. Draw or erase defect pixels image by image.
+  Manual masks are kept separately from full-image masks. The full-image labeling action
+  marks every pixel as defective; use it only when that is the intended label. The image
+  table reports training inclusion separately for manual-mask segmentation, full-image
+  segmentation, and classification, and detects changed images or masks.
+- **Model training:** train manual-mask segmentation, full-image-mask segmentation, or
+  classification-only models separately. Each class needs at least two images for
+  training/validation splitting. Trained checkpoints are available to download and use
+  in the current session.
+- **Folder analysis:** upload a ZIP or enter a local test folder path. All supported
+  images in the folder and subfolders are analyzed, with CSV results and predicted
+  segmentation masks available as downloads.
 
-The existing Gradio training program remains in `neu_training_gui.py`. The Streamlit app
-is an inference front end for the saved model files; it does not train models on Streamlit
-Community Cloud. Run the Gradio training app locally when you need to create or update
-the model files, then commit the desired checkpoint files in `outputs/`.
+ZIP uploads are limited to 500 MB and 1 GB uncompressed. Uploaded datasets and generated
+masks are kept in an ignored `outputs/streamlit_sessions/` workspace; they are not
+committed to the repository. Streamlit Cloud cannot browse folders on the user's
+computer, so use ZIP uploads there. Cloud session data and checkpoints should be
+downloaded before the app restarts.
+ZIPs may contain up to 20,000 files, and a folder analysis can process up to 20,000
+images per run.
+
+The original local Gradio program remains available in `neu_training_gui.py`.
 
 Classification scores are not calibrated probabilities or accuracy guarantees. Predicted
 defect masks are model predictions and are not guaranteed to match ground truth.

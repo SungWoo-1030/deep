@@ -130,7 +130,7 @@ st.markdown(
     <section class="hero">
       <div class="hero-kicker">NEU / VISION SYSTEMS · AI INSPECTION STUDIO</div>
       <h1>이미지로 시작하는<br>스마트 품질 검사</h1>
-      <p>모델 체크포인트와 사진을 올리고, 정답 마스크가 있다면 예측 결과와 비교할 수 있습니다.</p>
+      <p>결함 라벨링부터 모델 학습, 단일 이미지 및 폴더 전체 검사까지 수행할 수 있습니다.</p>
     </section>
     """,
     unsafe_allow_html=True,
